@@ -116,14 +116,18 @@ static struct net_device **slcan_devs;
  * <type> <id> <dlc> <data>*
  *
  * Extended frames (29 bit) are defined by capital characters in the type.
- * RTR frames are defined as 'r' types - normal frames have 't' type:
+ * RTR frames are defined as 'r' types - normal frames have type 't', 'f', or 'b':
  * t => 11 bit data frame
  * r => 11 bit RTR frame
  * T => 29 bit data frame
  * R => 29 bit RTR frame
+ * f => 11 bit FD frame
+ * F => 29 bit FD frame
+ * b => 11 bit FD BRS frame
+ * B => 29 bit FD BRS frame
  *
  * The <id> is 3 (standard) or 8 (extended) bytes in ASCII Hex (base64).
- * The <dlc> is a one byte ASCII number ('0' - '8')
+ * The <dlc> is a one byte ASCII character ('0' - '8') or ('0' - 'F') for FD frames
  * The <data> section has at much ASCII Hex bytes as defined by the <dlc>
  *
  * Examples:
@@ -132,12 +136,203 @@ static struct net_device **slcan_devs;
  * t4563112233 : can_id 0x456, can_dlc 3, data 0x11 0x22 0x33
  * T12ABCDEF2AA55 : extended can_id 0x12ABCDEF, can_dlc 2, data 0xAA 0x55
  * r1230 : can_id 0x123, can_dlc 0, no data, remote transmission request
+ * B12345678F<64 bytes> : can_id 0x12345678, can_dlc 1, 64 data bytes, fd brs format
  *
  */
 
  /************************************************************************
   *			STANDARD SLCAN DECAPSULATION			 *
   ************************************************************************/
+
+static int canfd_dlc_to_len(const char dlc)
+{
+	if(dlc < '0')
+	{
+		return -1;
+	}
+
+	if(('0' <= dlc) && (dlc < '9'))
+	{
+		return dlc - '0';
+	}
+
+	switch(dlc)
+	{
+		case '9':
+		{
+			return 12;
+		}
+		case 'A':
+		{
+			return 16;
+		}
+		case 'B':
+		{
+			return 20;
+		}
+		case 'C':
+		{
+			return 24;
+		}
+		case 'D':
+		{
+			return 32;
+		}
+		case 'E':
+		{
+			return 48;
+		}
+		case 'F':
+		{
+			return 64;
+		}
+		default:
+		{
+			return -1;
+		}
+	}
+
+	return -1;
+}
+
+static char canfd_len_to_dlc(const int len)
+{
+	if(len < 0)
+	{
+		return -1;
+	}
+
+	if((0 <= len) && (len < 9))
+	{
+		return len + '0';
+	}
+
+	switch(len)
+	{
+		case 12:
+		{
+			return '9';
+		}
+		case 16:
+		{
+			return 'A';
+		}
+		case 20:
+		{
+			return 'B';
+		}
+		case 24:
+		{
+			return 'C';
+		}
+		case 32:
+		{
+			return 'D';
+		}
+		case 48:
+		{
+			return 'E';
+		}
+		case 64:
+		{
+			return 'F';
+		}
+		default:
+		{
+			return -1;
+		}
+	}
+
+	return -1;
+}
+
+static void slc_bump_fd(struct slcan *sl)
+{
+	struct sk_buff *skb;
+	struct canfd_frame cf;
+	int i, tmp;
+	u32 tmpid;
+	char *cmd = sl->rbuff;
+
+	cf.can_id = 0;
+	cf.flags = 0;
+
+	switch(*cmd)
+	{
+	case 'b':
+		cf.flags |= CANFD_BRS;
+	case 'f':
+		/* store dlc ASCII value and terminate SFF CAN ID string */
+		cf.len = sl->rbuff[SLC_CMD_LEN + SLC_SFF_ID_LEN];
+		sl->rbuff[SLC_CMD_LEN + SLC_SFF_ID_LEN] = 0;
+		/* point to payload data behind the dlc */
+		cmd += SLC_CMD_LEN + SLC_SFF_ID_LEN + 1;
+		break;
+	case 'B':
+		cf.flags |= CANFD_BRS;
+	case 'F':
+		/* store dlc ASCII value and terminate SFF CAN ID string */
+		cf.len = sl->rbuff[SLC_CMD_LEN + SLC_EFF_ID_LEN];
+		sl->rbuff[SLC_CMD_LEN + SLC_EFF_ID_LEN] = 0;
+		/* point to payload data behind the dlc */
+		cmd += SLC_CMD_LEN + SLC_EFF_ID_LEN + 1;
+		break;
+	default:
+		return;
+	}
+
+	if (kstrtou32(sl->rbuff + SLC_CMD_LEN, 16, &tmpid))
+		return;
+
+	cf.can_id |= tmpid;
+
+	cf.len = canfd_dlc_to_len(cf.len);
+	if(cf.len < 0)
+	{
+		return;
+	}
+
+	/* clear payload */
+	*(u64 *) (&cf.data +  0) = 0;
+	*(u64 *) (&cf.data +  8) = 0;
+	*(u64 *) (&cf.data + 16) = 0;
+	*(u64 *) (&cf.data + 24) = 0;
+	*(u64 *) (&cf.data + 32) = 0;
+	*(u64 *) (&cf.data + 40) = 0;
+	*(u64 *) (&cf.data + 48) = 0;
+	*(u64 *) (&cf.data + 56) = 0;
+
+	for (i = 0; i < cf.len; i++) {
+		tmp = hex_to_bin(*cmd++);
+		if (tmp < 0)
+			return;
+		cf.data[i] = (tmp << 4);
+		tmp = hex_to_bin(*cmd++);
+		if (tmp < 0)
+			return;
+		cf.data[i] |= tmp;
+	}
+
+	skb = dev_alloc_skb(sizeof(struct canfd_frame) +
+			    sizeof(struct can_skb_priv));
+	if (!skb)
+		return;
+
+	skb->dev = sl->dev;
+	skb->protocol = htons(ETH_P_CAN);
+	skb->pkt_type = PACKET_BROADCAST;
+	skb->ip_summed = CHECKSUM_UNNECESSARY;
+
+	can_skb_reserve(skb);
+	can_skb_prv(skb)->ifindex = sl->dev->ifindex;
+	can_skb_prv(skb)->skbcnt = 0;
+
+	skb_put_data(skb, &cf, sizeof(struct canfd_frame));
+
+	sl->dev->stats.rx_packets++;
+	sl->dev->stats.rx_bytes += cf.len;
+	netif_rx_ni(skb);
+}
 
 /* Send one completely decapsulated can_frame to the network layer */
 static void slc_bump(struct slcan *sl)
@@ -172,6 +367,12 @@ static void slc_bump(struct slcan *sl)
 		/* point to payload data behind the dlc */
 		cmd += SLC_CMD_LEN + SLC_EFF_ID_LEN + 1;
 		break;
+	case 'b':
+	case 'B':
+	case 'f':
+	case 'F':
+		slc_bump_fd(sl);
+		return;
 	default:
 		return;
 	}
@@ -309,6 +510,62 @@ static void slc_encaps(struct slcan *sl, struct can_frame *cf)
 	sl->dev->stats.tx_bytes += cf->can_dlc;
 }
 
+/* Encapsulate one canfd_frame and stuff into a TTY queue. */
+static void slc_encaps_fd(struct slcan *sl, struct canfd_frame *cf)
+{
+	int actual, i;
+	unsigned char *pos;
+	unsigned char *endpos;
+	canid_t id = cf->can_id;
+
+	pos = sl->xbuff;
+
+	if (cf->flags & CANFD_BRS)
+		*pos = 'B'; /* becomes 'r' in standard frame format (SFF) */
+	else
+		*pos = 'F'; /* becomes 't' in standard frame format (SSF) */
+
+	/* determine number of chars for the CAN-identifier */
+	if (cf->can_id & CAN_EFF_FLAG) {
+		id &= CAN_EFF_MASK;
+		endpos = pos + SLC_EFF_ID_LEN;
+	} else {
+		*pos |= 0x20; /* convert R/T to lower case for SFF */
+		id &= CAN_SFF_MASK;
+		endpos = pos + SLC_SFF_ID_LEN;
+	}
+
+	/* build 3 (SFF) or 8 (EFF) digit CAN identifier */
+	pos++;
+	while (endpos >= pos) {
+		*endpos-- = hex_asc_upper[id & 0xf];
+		id >>= 4;
+	}
+
+	pos += (cf->can_id & CAN_EFF_FLAG) ? SLC_EFF_ID_LEN : SLC_SFF_ID_LEN;
+
+	*pos++ = canfd_len_to_dlc(cf->len);
+
+	for (i = 0; i < cf->len; i++)
+		pos = hex_byte_pack_upper(pos, cf->data[i]);
+
+	*pos++ = '\r';
+
+	/* Order of next two lines is *very* important.
+	 * When we are sending a little amount of data,
+	 * the transfer may be completed inside the ops->write()
+	 * routine, because it's running with interrupts enabled.
+	 * In this case we *never* got WRITE_WAKEUP event,
+	 * if we did not request it before write operation.
+	 *       14 Oct 1994  Dmitry Gorodchanin.
+	 */
+	set_bit(TTY_DO_WRITE_WAKEUP, &sl->tty->flags);
+	actual = sl->tty->ops->write(sl->tty, sl->xbuff, pos - sl->xbuff);
+	sl->xleft = (pos - sl->xbuff) - actual;
+	sl->xhead = sl->xbuff + actual;
+	sl->dev->stats.tx_bytes += cf->len;
+}
+
 /* Write out any remaining transmit buffer. Scheduled when tty is writable */
 static void slcan_transmit(struct work_struct *work)
 {
@@ -361,7 +618,7 @@ static netdev_tx_t slc_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct slcan *sl = netdev_priv(dev);
 
-	if (skb->len != CAN_MTU)
+	if ( (skb->len != CAN_MTU) && (skb->len == CANFD_MTU) )
 		goto out;
 
 	spin_lock(&sl->lock);
@@ -376,7 +633,17 @@ static netdev_tx_t slc_xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 
 	netif_stop_queue(sl->dev);
-	slc_encaps(sl, (struct can_frame *) skb->data); /* encaps & send */
+
+	/* encaps & send */
+	if (skb->len == CAN_MTU)
+	{
+		slc_encaps(sl, (struct can_frame *) skb->data);
+	}
+	else if(skb->len == CANFD_MTU)
+	{
+		slc_encaps_fd(sl, (struct canfd_frame *) skb->data);
+	}
+
 	spin_unlock(&sl->lock);
 
 out:
