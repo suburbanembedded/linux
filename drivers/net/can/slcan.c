@@ -201,13 +201,8 @@ static int canfd_dlc_to_len(const char dlc)
 	return -1;
 }
 
-static char canfd_len_to_dlc(const int len)
+static char canfd_len_to_dlc(const uint8_t len)
 {
-	if(len < 0)
-	{
-		return -1;
-	}
-
 	if((0 <= len) && (len < 9))
 	{
 		return len + '0';
@@ -250,6 +245,91 @@ static char canfd_len_to_dlc(const int len)
 	}
 
 	return -1;
+}
+
+/* Send one completely decapsulated canfd_frame to the network layer */
+static void slc_bump_fd(struct slcan *sl)
+{
+	struct sk_buff *skb;
+	struct canfd_frame cf;
+	int i, tmp;
+	u32 tmpid;
+	char *cmd = sl->rbuff;
+
+	cf.can_id = 0;
+	cf.flags = 0;
+
+	switch(*cmd)
+	{
+	case 'b':
+		cf.flags |= CANFD_BRS;
+	case 'f':
+		/* store dlc ASCII value and terminate SFF CAN ID string */
+		cf.len = sl->rbuff[SLC_CMD_LEN + SLC_SFF_ID_LEN];
+		sl->rbuff[SLC_CMD_LEN + SLC_SFF_ID_LEN] = 0;
+		/* point to payload data behind the dlc */
+		cmd += SLC_CMD_LEN + SLC_SFF_ID_LEN + 1;
+		break;
+	case 'B':
+		cf.flags |= CANFD_BRS;
+	case 'F':
+		/* store dlc ASCII value and terminate SFF CAN ID string */
+		cf.len = sl->rbuff[SLC_CMD_LEN + SLC_EFF_ID_LEN];
+		sl->rbuff[SLC_CMD_LEN + SLC_EFF_ID_LEN] = 0;
+		/* point to payload data behind the dlc */
+		cmd += SLC_CMD_LEN + SLC_EFF_ID_LEN + 1;
+		break;
+	default:
+		return;
+	}
+
+	if (kstrtou32(sl->rbuff + SLC_CMD_LEN, 16, &tmpid))
+		return;
+
+	cf.can_id |= tmpid;
+
+	cf.len = canfd_dlc_to_len(cf.len);
+	if(cf.len < 0)
+	{
+		return;
+	}
+
+	/* clear payload */
+	for (i = 0; i < 64; i+=8)
+	{
+		*(u64 *) (&cf.data + i) = 0;
+	}
+
+	for (i = 0; i < cf.len; i++) {
+		tmp = hex_to_bin(*cmd++);
+		if (tmp < 0)
+			return;
+		cf.data[i] = (tmp << 4);
+		tmp = hex_to_bin(*cmd++);
+		if (tmp < 0)
+			return;
+		cf.data[i] |= tmp;
+	}
+
+	skb = dev_alloc_skb(sizeof(struct canfd_frame) +
+			    sizeof(struct can_skb_priv));
+	if (!skb)
+		return;
+
+	skb->dev = sl->dev;
+	skb->protocol = htons(ETH_P_CAN);
+	skb->pkt_type = PACKET_BROADCAST;
+	skb->ip_summed = CHECKSUM_UNNECESSARY;
+
+	can_skb_reserve(skb);
+	can_skb_prv(skb)->ifindex = sl->dev->ifindex;
+	can_skb_prv(skb)->skbcnt = 0;
+
+	skb_put_data(skb, &cf, sizeof(struct canfd_frame));
+
+	sl->dev->stats.rx_packets++;
+	sl->dev->stats.rx_bytes += cf.len;
+	netif_rx_ni(skb);
 }
 
 /* Send one completely decapsulated can_frame to the network layer */
@@ -340,91 +420,6 @@ static void slc_bump(struct slcan *sl)
 
 	sl->dev->stats.rx_packets++;
 	sl->dev->stats.rx_bytes += cf.can_dlc;
-	netif_rx_ni(skb);
-}
-
-/* Send one completely decapsulated canfd_frame to the network layer */
-static void slc_bump_fd(struct slcan *sl)
-{
-	struct sk_buff *skb;
-	struct canfd_frame cf;
-	int i, tmp;
-	u32 tmpid;
-	char *cmd = sl->rbuff;
-
-	cf.can_id = 0;
-	cf.flags = 0;
-
-	switch(*cmd)
-	{
-	case 'b':
-		cf.flags |= CANFD_BRS;
-	case 'f':
-		/* store dlc ASCII value and terminate SFF CAN ID string */
-		cf.len = sl->rbuff[SLC_CMD_LEN + SLC_SFF_ID_LEN];
-		sl->rbuff[SLC_CMD_LEN + SLC_SFF_ID_LEN] = 0;
-		/* point to payload data behind the dlc */
-		cmd += SLC_CMD_LEN + SLC_SFF_ID_LEN + 1;
-		break;
-	case 'B':
-		cf.flags |= CANFD_BRS;
-	case 'F':
-		/* store dlc ASCII value and terminate SFF CAN ID string */
-		cf.len = sl->rbuff[SLC_CMD_LEN + SLC_EFF_ID_LEN];
-		sl->rbuff[SLC_CMD_LEN + SLC_EFF_ID_LEN] = 0;
-		/* point to payload data behind the dlc */
-		cmd += SLC_CMD_LEN + SLC_EFF_ID_LEN + 1;
-		break;
-	default:
-		return;
-	}
-
-	if (kstrtou32(sl->rbuff + SLC_CMD_LEN, 16, &tmpid))
-		return;
-
-	cf.can_id |= tmpid;
-
-	cf.len = canfd_dlc_to_len(cf.len);
-	if(cf.len < 0)
-	{
-		return;
-	}
-
-	/* clear payload */
-	for (i = 0; i < 64; i+=8)
-	{
-		*(u64 *) (&cf.data + i) = 0;
-	}
-
-	for (i = 0; i < cf.len; i++) {
-		tmp = hex_to_bin(*cmd++);
-		if (tmp < 0)
-			return;
-		cf.data[i] = (tmp << 4);
-		tmp = hex_to_bin(*cmd++);
-		if (tmp < 0)
-			return;
-		cf.data[i] |= tmp;
-	}
-
-	skb = dev_alloc_skb(sizeof(struct canfd_frame) +
-			    sizeof(struct can_skb_priv));
-	if (!skb)
-		return;
-
-	skb->dev = sl->dev;
-	skb->protocol = htons(ETH_P_CAN);
-	skb->pkt_type = PACKET_BROADCAST;
-	skb->ip_summed = CHECKSUM_UNNECESSARY;
-
-	can_skb_reserve(skb);
-	can_skb_prv(skb)->ifindex = sl->dev->ifindex;
-	can_skb_prv(skb)->skbcnt = 0;
-
-	skb_put_data(skb, &cf, sizeof(struct canfd_frame));
-
-	sl->dev->stats.rx_packets++;
-	sl->dev->stats.rx_bytes += cf.len;
 	netif_rx_ni(skb);
 }
 
