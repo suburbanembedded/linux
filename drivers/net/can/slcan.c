@@ -618,7 +618,7 @@ static netdev_tx_t slc_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct slcan *sl = netdev_priv(dev);
 
-	if ( (skb->len != CAN_MTU) && (skb->len == CANFD_MTU) )
+	if ( (skb->len != CAN_MTU) && (skb->len != CANFD_MTU) )
 		goto out;
 
 	spin_lock(&sl->lock);
