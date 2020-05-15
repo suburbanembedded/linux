@@ -122,13 +122,13 @@ static struct net_device **slcan_devs;
  * <type> <id> <dlc> <data>*
  *
  * Extended frames (29 bit) are defined by capital characters in the type.
- * RTR frames are defined as 'r' types - normal frames have type 't', 'f', or 'b':
+ * RTR frames are defined as 'r' types - normal frames have type 't', 'd', or 'b':
  * t => 11 bit data frame
  * r => 11 bit RTR frame
  * T => 29 bit data frame
  * R => 29 bit RTR frame
- * f => 11 bit FD frame
- * F => 29 bit FD frame
+ * d => 11 bit FD frame
+ * D => 29 bit FD frame
  * b => 11 bit FD BRS frame
  * B => 29 bit FD BRS frame
  *
@@ -263,7 +263,7 @@ static void slc_bump_fd(struct slcan *sl)
 	{
 	case 'b':
 		cf.flags |= CANFD_BRS;
-	case 'f':
+	case 'd':
 		/* store dlc ASCII value and terminate SFF CAN ID string */
 		cf.len = sl->rbuff[SLC_CMD_LEN + SLC_SFF_ID_LEN];
 		sl->rbuff[SLC_CMD_LEN + SLC_SFF_ID_LEN] = 0;
@@ -272,7 +272,7 @@ static void slc_bump_fd(struct slcan *sl)
 		break;
 	case 'B':
 		cf.flags |= CANFD_BRS;
-	case 'F':
+	case 'D':
 		/* store dlc ASCII value and terminate SFF CAN ID string */
 		cf.len = sl->rbuff[SLC_CMD_LEN + SLC_EFF_ID_LEN];
 		sl->rbuff[SLC_CMD_LEN + SLC_EFF_ID_LEN] = 0;
@@ -367,8 +367,8 @@ static void slc_bump(struct slcan *sl)
 		break;
 	case 'b':
 	case 'B':
-	case 'f':
-	case 'F':
+	case 'd':
+	case 'D':
 		slc_bump_fd(sl);
 		return;
 	default:
@@ -519,9 +519,9 @@ static void slc_encaps_fd(struct slcan *sl, struct canfd_frame *cf)
 	pos = sl->xbuff;
 
 	if (cf->flags & CANFD_BRS)
-		*pos = 'B'; /* becomes 'r' in standard frame format (SFF) */
+		*pos = 'B'; /* becomes 'b' in standard frame format (SFF) */
 	else
-		*pos = 'F'; /* becomes 't' in standard frame format (SSF) */
+		*pos = 'D'; /* becomes 'd' in standard frame format (SSF) */
 
 	/* determine number of chars for the CAN-identifier */
 	if (cf->can_id & CAN_EFF_FLAG) {
