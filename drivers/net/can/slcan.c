@@ -273,6 +273,7 @@ static void slc_bump_fd(struct slcan *sl)
 	case 'B':
 		cf.flags |= CANFD_BRS;
 	case 'D':
+		cf.can_id |= CAN_EFF_FLAG;
 		/* store dlc ASCII value and terminate SFF CAN ID string */
 		cf.len = sl->rbuff[SLC_CMD_LEN + SLC_EFF_ID_LEN];
 		sl->rbuff[SLC_CMD_LEN + SLC_EFF_ID_LEN] = 0;
