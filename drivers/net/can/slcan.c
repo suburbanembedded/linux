@@ -74,10 +74,10 @@ MODULE_PARM_DESC(maxdev, "Maximum number of slcan interfaces");
 //cmd  -  1
 //id   -  8
 //dlc  -  1
-//data - 64
+//data - 128
 //time -  4
 //cr   -  1
-#define SLC_MTU ((1+8+1+64+4+1)+1)
+#define SLC_MTU ((1+8+1+128+4+1)+1)
 
 #define SLC_CMD_LEN 1
 #define SLC_SFF_ID_LEN 3
