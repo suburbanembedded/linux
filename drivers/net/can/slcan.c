@@ -318,7 +318,7 @@ static void slc_bump_fd(struct slcan *sl)
 		return;
 
 	skb->dev = sl->dev;
-	skb->protocol = htons(ETH_P_CAN);
+	skb->protocol = htons(ETH_P_CANFD);
 	skb->pkt_type = PACKET_BROADCAST;
 	skb->ip_summed = CHECKSUM_UNNECESSARY;
 
